@@ -214,7 +214,8 @@ def run_grid_search_nested_cv(inputs, labels, folds, args):
         res = parallel(joblib.delayed(logger.run)(params, train_valid_folds, dtrain_valid_combined,
                        dtest, args.distribution) for params in dict_product(grid))
 
-    best_params = logger.best_params()
+    best_params = logger.best_params
+    trials = logger.trials
     best_params.update(base_params)
     best_params['aft_loss_distribution'] = args.distribution
     final_model = xgb.train(best_params, dtrain_valid_combined, num_boost_round=best_num_round,
