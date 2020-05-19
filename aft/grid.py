@@ -9,6 +9,7 @@ import joblib
 import boto3
 import time
 import itertools
+import threading
 import json
 import argparse
 from multiprocessing import cpu_count
@@ -19,6 +20,7 @@ class Trial:
     number: int
     score: float
     test_acc: float
+    best_num_round: int
 
 def dict_product(d):
     keys = d.keys()
@@ -131,6 +133,48 @@ def train(params, train_valid_folds, dtrain_valid_combined, dtest, distribution)
             'test_acc': test_acc}
 
 
+class ParallelLogger:
+    def __init__(self, func, f):
+        self._func = func
+        self._lock = threading.RLock()
+        self._trials = []
+        self._trial_id = 0
+        self._best_val_acc = None
+        self._best_trial_id = None
+        self._best_params = None
+        self._f = f
+
+    def run(self, params, *args, **kwargs):
+        res = self._func(params, *args, *kwargs)
+        with self._lock:
+            self._trials.append(Trial(number=self._trial_id, score=res['score'],
+                                      test_acc=res['test_acc'],
+                                      best_num_round=res['best_num_round']))
+            if self._best_val_acc is None or res['score'] > self._best_val_acc:
+                self._best_trial_id = self._trial_id
+                self._best_val_acc = res['score']
+                self._best_params = copy.deepcopy(params)
+
+            msg = (f'Trial #{self._trial_id} completed. Valid. accuracy = {res["score"]} with ' +
+                   f'params = {params}. Best trial is #{self._best_trial_id} with validation ' + 
+                   f'accuracy {self._best_val_acc}.')
+            print(msg)
+            print(msg, file=self._f)
+
+            self._trial_id += 1
+
+    @property
+    def trials(self):
+        return self._trials
+
+    @property
+    def best_trial_id(self):
+        return self._best_trial_id
+
+    @property
+    def best_params(self):
+        return self._best_params
+
 def run_grid_search_nested_cv(inputs, labels, folds, args):
     # Nested Cross-Validation, with 4-folds CV in the outer loop and 5-folds CV in the inner loop
     # Outer test fold is set by script argument
@@ -163,33 +207,14 @@ def run_grid_search_nested_cv(inputs, labels, folds, args):
     trials = []
     params = []
     trial_id = 0
-    space = dict_product(grid)
-    while True:
-        params = []
-        try:
-            for _ in range(args.nthread):
-                params.append(next(space))
-        except StopIteration:
-            if not params:
-                break
-        with joblib.Parallel(n_jobs=args.nthread, prefer='threads') as parallel:
-            res = parallel(joblib.delayed(train)(params[i], train_valid_folds, dtrain_valid_combined,
-                           dtest, args.distribution) for i in range(len(params)))
-        for i in range(len(params)):
-            trials.append(Trial(number=trial_id, score=res[i]['score'], test_acc=res[i]['test_acc']))
-            if best_val_acc is None or res[i]['score'] > best_val_acc:
-                best_trial_id = trial_id
-                best_val_acc = res[i]['score']
-                best_params = copy.deepcopy(params[i])
-                best_num_round = res[i]['best_num_round']
-            print(f'Trial #{trial_id} completed. Validation accuracy = {res[i]["score"]} with ' +
-                  f'params = {params[i]}. Best trial is #{best_trial_id} with validation ' + 
-                  f'accuracy {best_val_acc}.')
-            print(f'Trial #{trial_id} completed. Validation accuracy = {res[i]["score"]} with ' +
-                  f'params = {params[i]}. Best trial is #{best_trial_id} with validation ' + 
-                  f'accuracy {best_val_acc}.', file=f)
-            trial_id += 1
 
+    logger = ParallelLogger(train, f)
+
+    with joblib.Parallel(n_jobs=args.nthread, prefer='threads') as parallel:
+        res = parallel(joblib.delayed(logger.run)(params, train_valid_folds, dtrain_valid_combined,
+                       dtest, args.distribution) for params in dict_product(grid))
+
+    best_params = logger.best_params()
     best_params.update(base_params)
     best_params['aft_loss_distribution'] = args.distribution
     final_model = xgb.train(best_params, dtrain_valid_combined, num_boost_round=best_num_round,
