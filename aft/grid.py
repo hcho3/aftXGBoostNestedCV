@@ -140,6 +140,7 @@ class ParallelLogger:
         self._trials = []
         self._trial_id = 0
         self._best_val_acc = None
+        self._best_trial = None
         self._best_trial_id = None
         self._best_params = None
         self._f = f
@@ -147,13 +148,14 @@ class ParallelLogger:
     def run(self, params, *args, **kwargs):
         res = self._func(params, *args, *kwargs)
         with self._lock:
-            self._trials.append(Trial(number=self._trial_id, score=res['score'],
-                                      test_acc=res['test_acc'],
-                                      best_num_round=res['best_num_round']))
+            trial = Trial(number=self._trial_id, score=res['score'],
+                          test_acc=res['test_acc'], best_num_round=res['best_num_round'])
+            self._trials.append(trial)
             if self._best_val_acc is None or res['score'] > self._best_val_acc:
                 self._best_trial_id = self._trial_id
                 self._best_val_acc = res['score']
                 self._best_params = copy.deepcopy(params)
+                self._best_trial = copy.deepcopy(trial)
 
             msg = (f'Trial #{self._trial_id} completed. Valid. accuracy = {res["score"]} with ' +
                    f'params = {params}. Best trial is #{self._best_trial_id} with validation ' + 
@@ -170,6 +172,10 @@ class ParallelLogger:
     @property
     def best_trial_id(self):
         return self._best_trial_id
+
+    @property
+    def best_trial(self):
+        return self._best_trial
 
     @property
     def best_params(self):
@@ -200,13 +206,6 @@ def run_grid_search_nested_cv(inputs, labels, folds, args):
     for k, v in sorted(grid.items(), key=lambda x : x[0]):
         if k not in args.hyperparameters:
             grid[k] = [defaults[k]]
-    best_trial_id = None
-    best_val_acc = None
-    best_params = None
-    best_num_round = None
-    trials = []
-    params = []
-    trial_id = 0
 
     logger = ParallelLogger(train, f)
 
@@ -218,7 +217,8 @@ def run_grid_search_nested_cv(inputs, labels, folds, args):
     trials = logger.trials
     best_params.update(base_params)
     best_params['aft_loss_distribution'] = args.distribution
-    final_model = xgb.train(best_params, dtrain_valid_combined, num_boost_round=best_num_round,
+    final_model = xgb.train(best_params, dtrain_valid_combined,
+                            num_boost_round=logger.best_trial.best_num_round,
                             evals=[(dtrain_valid_combined, 'train-valid'), (dtest, 'test')],
                             verbose_eval=False)
 
